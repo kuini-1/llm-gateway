@@ -202,9 +202,28 @@ The router and breaker tests cover every row of the failure table above.
 
 See [`gateway.example.yaml`](gateway.example.yaml). `${ENV}` references are expanded at load time, so keys stay out of the file. Each route lists its targets in fallback order, and every model a route uses needs a price.
 
+Environment variables are listed in [`.env.example`](.env.example). Docker Compose reads a `.env` file in this folder automatically. The local `gateway.yaml` and `.env` are gitignored and kept out of Docker builds by `.dockerignore`.
+
+## Model providers and licenses
+
+- **Anthropic Claude**, through the official Go SDK ([`anthropic-sdk-go`](https://github.com/anthropics/anthropic-sdk-go), Apache 2.0). It uses prompt caching, effort mapping, and Anthropic's server-side refusal fallback when a provider sets `server_side_fallback: true`.
+- **OpenAI, DeepSeek and self-hosted models**, through one adapter over plain HTTP (`net/http`), for any server that speaks the OpenAI chat completions and embeddings format.
+- **Billing:** each provider bills its own usage under its own terms. Anthropic prices in `gateway.example.yaml` are list prices as of November 2026. The other providers' prices are left at 0 with a note to fill them in, and spend caps are only as accurate as these numbers.
+- **The mock providers** (`cmd/mockllm`) were written for this project. They imitate the Anthropic and OpenAI APIs for the demo, tests and benchmarks.
+- **Dependencies:** pgx (MIT), go-redis (BSD 2-Clause), go.yaml.in/yaml (MIT and Apache 2.0). The compose file uses the official `postgres:17-alpine` image (PostgreSQL License) and `redis:7-alpine`. Redis 7.4 and later are dual-licensed RSALv2/SSPLv1, which allows self-hosting like this.
+
 ## Limitations
 
 - Text chat only. Tool calling, images and `response_format` are rejected with 400 rather than translated.
 - Circuit breakers are per gateway instance. With several instances, each opens its own circuit, which is safe but takes a few more failed calls in total.
 - If a streaming client disconnects mid-answer, the request is logged with cost 0, because the provider never sends final usage. The provider may still bill for the tokens it generated.
 - Prices are configuration. The gateway doesn't fetch them, so they must be kept up to date by hand.
+
+## Lessons learned
+
+- **Test the case where everything is down.** The first router, when every circuit was open, still sent the request to the first target "just in case". So a single-target route kept calling a dead provider on every request, which defeats the breaker. It now answers 503 `circuit_open` straight away: 5 ms at p50 in the outage benchmark, with 0 of 600 calls reaching the dead provider.
+- **Define "fallback" from the client's side.** At first a request counted as a fallback only if an earlier attempt had failed. Requests that skipped an open circuit and went straight to the secondary weren't counted, so the dashboard understated an outage exactly while one was happening. Comparing the target that served the request with the route's first target fixed it.
+- **Retries belong in one layer.** The SDK's default retries, with backoff, under the gateway's own fallback would make a client wait seconds on a dead provider before moving to the next one. With SDK retries off, the gateway is the only place that decides to retry, and where.
+- **Check spend before the call, not after.** A check after the call lets many concurrent requests each see room under the cap. Reserving the worst case atomically and settling the real cost afterwards holds under load: 200 concurrent $0.01 reservations against a $1 cap let exactly 100 through.
+- **A cache hit rate isn't a savings rate.** 79% of embedding inputs came from cache, but spend fell 71%, because savings are weighted by tokens and the hits were mostly short queries. For embeddings, the latency win (1.6 ms instead of 48.7 ms) matters more than the money.
+- **Status codes are instructions to the client.** OpenAI SDKs retry 429 automatically. That's right for a rate limit but pointless for an exhausted monthly budget, so budget refusals use 402.
