@@ -108,7 +108,7 @@ func serve(ctx context.Context, args []string) error {
 		Cfg: cfg, Router: router.New(cfg), Prices: pricing.Table(cfg.Prices), Store: st, ReqLog: reqLog,
 		Budget:     &budget.Budget{RDB: rdb, Load: st.MonthSpend},
 		Limiter:    &budget.Limiter{RDB: rdb},
-		AdminToken: os.Getenv("GATEWAY_ADMIN_TOKEN"),
+		AdminToken: cfg.AdminToken,
 		Dashboard:  assets.Dashboard(),
 		OpenAPI:    assets.OpenAPI(),
 		Log:        log,

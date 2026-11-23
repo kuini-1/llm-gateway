@@ -99,24 +99,26 @@ type Attempt struct {
 }
 
 type ChatResult struct {
-	Resp     *provider.ChatResponse
-	Target   config.Target
-	Attempts []Attempt
-	TTFB     time.Duration // to the first streamed token
+	Resp      *provider.ChatResponse
+	Target    config.Target
+	Preferred config.Target // the route's first target
+	Attempts  []Attempt
+	TTFB      time.Duration // to the first streamed token
 }
 
-// FallbackFrom is the first target tried, when it isn't the one that answered.
-func (c *ChatResult) FallbackFrom() string {
-	for _, a := range c.Attempts {
-		if !a.Skipped {
-			if a.Provider != c.Target.Provider || a.Model != c.Target.Model {
-				return a.Provider + "/" + a.Model
-			}
-			return ""
-		}
+// FallbackFrom names the route's first target when another one answered,
+// whether the first failed or was skipped because its circuit was open.
+func (c *ChatResult) FallbackFrom() string { return fallbackFrom(c.Preferred, c.Target) }
+
+func fallbackFrom(preferred, served config.Target) string {
+	if served.Provider == "" || served == preferred {
+		return ""
 	}
-	return ""
+	return preferred.Provider + "/" + preferred.Model
 }
+
+// ErrCircuitOpen is the last error when every target was skipped.
+var ErrCircuitOpen = &provider.Error{Kind: provider.KindUnavailable, Message: "every target's circuit breaker is open"}
 
 // AllFailed is returned when no target produced an answer.
 type AllFailed struct {
@@ -136,9 +138,10 @@ func (e *AllFailed) Error() string {
 	return "all targets failed: " + strings.Join(parts, "; ")
 }
 
-// order puts allowed targets first, keeping the configured order; when every
-// breaker is open it still tries the first target rather than fail without
-// trying.
+// order splits targets into those whose breaker lets a request through and
+// those skipped, keeping the configured order. When every circuit is open
+// the request fails fast: the point of the breaker is to stop paying a
+// timeout or an error on every call to a provider that is down.
 func (r *Router) order(rt config.Route) (try []config.Target, skipped []config.Target) {
 	for _, t := range rt.Targets {
 		if r.breaker(t).Allow() {
@@ -146,10 +149,6 @@ func (r *Router) order(rt config.Route) (try []config.Target, skipped []config.T
 		} else {
 			skipped = append(skipped, t)
 		}
-	}
-	if len(try) == 0 && len(rt.Targets) > 0 {
-		try = []config.Target{rt.Targets[0]}
-		skipped = skipped[1:]
 	}
 	return try, skipped
 }
@@ -165,12 +164,12 @@ func (r *Router) Stream(ctx context.Context, rt config.Route, req provider.ChatR
 }
 
 func (r *Router) chatOrStream(ctx context.Context, rt config.Route, req provider.ChatRequest, emit func(provider.Delta) error) (*ChatResult, error) {
-	res := &ChatResult{}
+	res := &ChatResult{Preferred: rt.Targets[0]}
 	try, skipped := r.order(rt)
 	for _, t := range skipped {
 		res.Attempts = append(res.Attempts, Attempt{Provider: t.Provider, Model: t.Model, Skipped: true})
 	}
-	var last *provider.Error
+	last := ErrCircuitOpen
 	for _, t := range try {
 		c, ok := r.chat[t.Provider]
 		if !ok {
@@ -227,18 +226,21 @@ func countsAgainstBreaker(k provider.ErrorKind) bool {
 }
 
 type EmbedResult struct {
-	Resp     *provider.EmbedResponse
-	Target   config.Target
-	Attempts []Attempt
+	Resp      *provider.EmbedResponse
+	Target    config.Target
+	Preferred config.Target
+	Attempts  []Attempt
 }
 
+func (e *EmbedResult) FallbackFrom() string { return fallbackFrom(e.Preferred, e.Target) }
+
 func (r *Router) Embed(ctx context.Context, rt config.Route, input []string) (*EmbedResult, error) {
-	res := &EmbedResult{}
+	res := &EmbedResult{Preferred: rt.Targets[0]}
 	try, skipped := r.order(rt)
 	for _, t := range skipped {
 		res.Attempts = append(res.Attempts, Attempt{Provider: t.Provider, Model: t.Model, Skipped: true})
 	}
-	var last *provider.Error
+	last := ErrCircuitOpen
 	for _, t := range try {
 		e, ok := r.embed[t.Provider]
 		if !ok {

@@ -41,6 +41,7 @@ type Gateway struct {
 
 func (g *Gateway) Handler() http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) { http.Redirect(w, r, "/admin/", http.StatusFound) })
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok")) })
 	mux.HandleFunc("GET /readyz", g.readyz)
 	mux.HandleFunc("GET /openapi.yaml", func(w http.ResponseWriter, _ *http.Request) {
@@ -330,6 +331,9 @@ func (g *Gateway) logError(rec *store.Request, status int, code, msg string, res
 // upstreamError maps a routing failure to the status the client sees.
 func upstreamError(err error) (int, string, string) {
 	var all *router.AllFailed
+	if errors.As(err, &all) && all.Last == router.ErrCircuitOpen {
+		return http.StatusServiceUnavailable, "circuit_open", all.Error()
+	}
 	if errors.As(err, &all) && all.Last != nil {
 		switch all.Last.Kind {
 		case provider.KindInvalid:
@@ -507,7 +511,7 @@ func (g *Gateway) embeddings(w http.ResponseWriter, r *http.Request, k *store.Ke
 		}
 		rec.Provider, rec.Model = result.Target.Provider, result.Target.Model
 		rec.Attempts, _ = json.Marshal(result.Attempts)
-		rec.FallbackFrom = fallbackFrom(result.Attempts, result.Target.Provider)
+		rec.FallbackFrom = result.FallbackFrom()
 	} else {
 		rec.Provider, rec.Model = "cache", model
 	}
@@ -546,18 +550,6 @@ func tokenShares(texts []string, total int64) []int64 {
 		out[len(out)-1] += total - given // rounding remainder
 	}
 	return out
-}
-
-func fallbackFrom(attempts []router.Attempt, winner string) string {
-	for _, a := range attempts {
-		if !a.Skipped {
-			if a.Provider != winner {
-				return a.Provider + "/" + a.Model
-			}
-			return ""
-		}
-	}
-	return ""
 }
 
 // ---- helpers ----

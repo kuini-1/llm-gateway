@@ -156,14 +156,25 @@ func TestHalfOpenFailureReopens(t *testing.T) {
 	}
 }
 
-func TestAllOpenStillTriesFirstTarget(t *testing.T) {
+func TestAllOpenFailsFast(t *testing.T) {
 	a := &fake{name: "a", errs: []error{status(503)}}
 	r, rt := setup(1, a)
 	r.Chat(context.Background(), rt, req) // opens
 	a.errs = nil
+	_, err := r.Chat(context.Background(), rt, req)
+	var all *AllFailed
+	if !errors.As(err, &all) || all.Last != ErrCircuitOpen || a.calls != 1 {
+		t.Fatalf("expected a fast failure without calling a, got %v (calls %d)", err, a.calls)
+	}
+}
+
+func TestSkippedPrimaryCountsAsFallback(t *testing.T) {
+	a, b := &fake{name: "a", errs: []error{status(503)}}, &fake{name: "b"}
+	r, rt := setup(1, a, b)
+	r.Chat(context.Background(), rt, req) // a fails once: circuit opens
 	res, err := r.Chat(context.Background(), rt, req)
-	if err != nil || res.Resp.Content != "a:m-a" {
-		t.Fatalf("expected a forced probe, got %v", err)
+	if err != nil || !res.Attempts[0].Skipped || res.FallbackFrom() != "a/m-a" {
+		t.Fatalf("skipped primary should still count as a fallback: %+v %v", res, err)
 	}
 }
 

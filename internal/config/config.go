@@ -14,6 +14,7 @@ import (
 
 type Config struct {
 	Listen         string              `yaml:"listen"`
+	AdminToken     string              `yaml:"admin_token"` // usually "${GATEWAY_ADMIN_TOKEN}"; empty disables the admin API
 	PostgresURL    string              `yaml:"postgres_url"`
 	RedisURL       string              `yaml:"redis_url"`
 	Providers      map[string]Provider `yaml:"providers"`
