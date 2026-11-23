@@ -1,0 +1,50 @@
+# Demo configuration for docker compose: two mock providers, no API keys.
+listen: 0.0.0.0:8080
+postgres_url: ${GATEWAY_POSTGRES_URL}
+redis_url: ${GATEWAY_REDIS_URL}
+admin_token: ${GATEWAY_ADMIN_TOKEN}
+
+providers:
+  claude-mock:
+    kind: anthropic
+    base_url: http://mock-primary:9001
+    api_key: mock
+    timeout: 10s
+  openai-mock:
+    kind: openai
+    base_url: http://mock-secondary:9002/v1
+    api_key: mock
+    timeout: 10s
+
+routes:
+  bench-direct:
+    kind: chat
+    targets: [{provider: openai-mock, model: gpt-bench}]
+  bench-primary-only:
+    kind: chat
+    targets: [{provider: claude-mock, model: claude-bench}]
+  bench-fallback:
+    kind: chat
+    targets:
+      - {provider: claude-mock, model: claude-bench}
+      - {provider: openai-mock, model: gpt-bench}
+  bench-embed:
+    kind: embedding
+    targets: [{provider: openai-mock, model: embed-bench}]
+
+prices:
+  claude-bench: {input: 4, output: 20, cache_read: 0.2, cache_write: 5}
+  gpt-bench: {input: 1, output: 4}
+  embed-bench: {input: 0.02}
+
+embedding_cache:
+  enabled: true
+  ttl: 720h
+
+circuit_breaker:
+  failure_threshold: 5
+  open_for: 30s
+
+defaults:
+  max_tokens: 1000
+  rpm: 600

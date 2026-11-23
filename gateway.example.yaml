@@ -1,0 +1,69 @@
+# Copy to gateway.yaml and set the environment variables it references.
+listen: 0.0.0.0:8080
+postgres_url: ${GATEWAY_POSTGRES_URL}
+redis_url: ${GATEWAY_REDIS_URL}
+admin_token: ${GATEWAY_ADMIN_TOKEN}
+
+providers:
+  anthropic:
+    kind: anthropic
+    api_key: ${ANTHROPIC_API_KEY}
+    timeout: 120s
+    prompt_caching: true         # cache long system prompts and history automatically
+    server_side_fallback: true   # Anthropic retries a refused request on a fallback model in the same call
+  openai:
+    kind: openai
+    base_url: https://api.openai.com/v1
+    api_key: ${OPENAI_API_KEY}
+    timeout: 120s
+  deepseek:
+    kind: openai                 # DeepSeek speaks the OpenAI format
+    base_url: https://api.deepseek.com
+    api_key: ${DEEPSEEK_API_KEY}
+    timeout: 120s
+
+# What clients put in "model". Targets are tried in order.
+routes:
+  smart:
+    kind: chat
+    targets:
+      - {provider: anthropic, model: claude-opus-5-5}
+      - {provider: openai, model: gpt-5-mini}        # replace with a model your OpenAI account offers
+  fast:
+    kind: chat
+    targets:
+      - {provider: anthropic, model: claude-haiku-5-5}
+      - {provider: deepseek, model: deepseek-chat}
+  cheap:
+    kind: chat
+    targets:
+      - {provider: deepseek, model: deepseek-chat}
+      - {provider: anthropic, model: claude-haiku-5-5}
+  embed:
+    kind: embedding                                 # fallbacks must serve the same model
+    targets:
+      - {provider: openai, model: text-embedding-3-small}
+
+# USD per million tokens. Spend caps and cost reports use these numbers.
+# Anthropic list prices as of November 2026; check the others on each
+# provider's pricing page before relying on the caps.
+prices:
+  claude-opus-5-5:   {input: 4.00, output: 20.00, cache_read: 0.20, cache_write: 5.00}
+  claude-sonnet-5-5: {input: 2.00, output: 10.00, cache_read: 0.10, cache_write: 2.50}
+  claude-haiku-5-5:  {input: 0.10, output: 0.50, cache_read: 0.01, cache_write: 0.125}
+  gpt-5-mini:        {input: 0, output: 0}          # set from openai.com/pricing
+  deepseek-chat:     {input: 0, output: 0}          # set from the DeepSeek pricing page
+  text-embedding-3-small: {input: 0.02}
+
+embedding_cache:
+  enabled: true
+  ttl: 720h
+
+circuit_breaker:
+  failure_threshold: 5
+  open_for: 30s
+
+defaults:
+  max_tokens: 16000
+  rpm: 600
+  allow_unpriced: false

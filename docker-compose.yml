@@ -1,0 +1,53 @@
+# docker compose up --build
+#
+# Starts Postgres, Redis, the gateway and two mock providers, so everything
+# works without API keys. Dashboard: http://localhost:8080/admin/ (token below; GATEWAY_PORT changes the port).
+# For real providers, mount your own gateway.yaml instead of the demo config.
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: gateway
+      POSTGRES_PASSWORD: gateway
+      POSTGRES_DB: gateway
+    volumes: [pg:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "gateway"]
+      interval: 3s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "60", "1000"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      retries: 20
+
+  mock-primary:
+    build: .
+    entrypoint: ["mockllm", "-addr", "0.0.0.0:9001", "-name", "claude-mock"]
+    healthcheck: {disable: true}
+
+  mock-secondary:
+    build: .
+    entrypoint: ["mockllm", "-addr", "0.0.0.0:9002", "-name", "openai-mock"]
+    healthcheck: {disable: true}
+
+  gateway:
+    build: .
+    ports: ["${GATEWAY_PORT:-8080}:8080"]
+    environment:
+      GATEWAY_POSTGRES_URL: postgres://gateway:gateway@postgres:5432/gateway
+      GATEWAY_REDIS_URL: redis://redis:6379/0
+      GATEWAY_ADMIN_TOKEN: ${GATEWAY_ADMIN_TOKEN:-change-me}
+    volumes:
+      - ./deploy/gateway.compose.yaml:/etc/gateway/gateway.yaml:ro
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+      mock-primary: {condition: service_started}
+      mock-secondary: {condition: service_started}
+
+volumes:
+  pg:
