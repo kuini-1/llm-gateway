@@ -1,0 +1,59 @@
+# Real-model run of gwbench: local models served by Ollama, no API keys.
+#   ollama pull qwen3:4b-instruct && ollama pull llama3.2:3b && ollama pull gemma3:1b
+# Ollama speaks both the OpenAI and the Anthropic API, so the same model is
+# reachable through both of the gateway's provider adapters.
+listen: ${GATEWAY_LISTEN}  # defaults to 127.0.0.1:8080
+postgres_url: ${GATEWAY_POSTGRES_URL}
+redis_url: ${GATEWAY_REDIS_URL}
+admin_token: ${GATEWAY_ADMIN_TOKEN}
+
+providers:
+  ollama-openai:
+    kind: openai
+    base_url: http://127.0.0.1:11434/v1
+    api_key: ollama
+    timeout: 120s
+  ollama-anthropic:
+    kind: anthropic          # the official Anthropic Go SDK, pointed at Ollama's /v1/messages
+    base_url: http://127.0.0.1:11434
+    api_key: ollama
+    timeout: 120s
+  nothing-here:              # a provider that refuses connections, to exercise fallback for real
+    kind: openai
+    base_url: http://127.0.0.1:9/v1
+    api_key: none
+    timeout: 5s
+
+routes:
+  qwen-via-openai:
+    kind: chat
+    targets: [{provider: ollama-openai, model: "qwen3:4b-instruct"}]
+  qwen-via-anthropic:
+    kind: chat
+    targets: [{provider: ollama-anthropic, model: "qwen3:4b-instruct"}]
+  llama:
+    kind: chat
+    targets: [{provider: ollama-openai, model: "llama3.2:3b"}]
+  gemma:
+    kind: chat
+    targets: [{provider: ollama-openai, model: "gemma3:1b"}]
+  fallback-to-local:
+    kind: chat
+    targets:
+      - {provider: nothing-here, model: "qwen3:4b-instruct"}
+      - {provider: ollama-openai, model: "qwen3:4b-instruct"}
+
+# Local models have no per-token price. Recording them at 0 keeps the request
+# log and dashboard working; spend caps have nothing to cap.
+prices:
+  "qwen3:4b-instruct": {input: 0, output: 0}
+  "llama3.2:3b": {input: 0, output: 0}
+  "gemma3:1b": {input: 0, output: 0}
+
+circuit_breaker:
+  failure_threshold: 5
+  open_for: 30s
+
+defaults:
+  max_tokens: 1000
+  rpm: 6000

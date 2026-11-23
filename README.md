@@ -72,7 +72,7 @@ flowchart LR
 
 ## Benchmarks
 
-`gwbench` drives a running gateway against the mock providers, so every number below was measured on a laptop. Full output: [`bench/results/all.md`](bench/results/all.md).
+`gwbench` drives a running gateway, and every number below was measured on a laptop. The first three benchmarks use the mock providers (full output: [`bench/results/all.md`](bench/results/all.md)). The last uses real local models.
 
 ### Overhead
 
@@ -114,9 +114,31 @@ Spend fell **71%**: $0.0021 instead of $0.0073. The rate is lower than the 79% i
 
 In general: **saved = (share of tokens served from cache) × (tokens per month) × (price per token)**. At this workload's 71% and $0.02 per million tokens, a service embedding 1 billion tokens a month saves about $14. With a $0.13-per-million model it's about $92. Embeddings are cheap, so on most workloads **the bigger wins are latency** (1.6 ms for a cached query vs 48.7 ms upstream) and staying under the provider's rate limits. Chat completions are where spend caps matter.
 
-### Real provider latency
+### Real models: local providers through Ollama
 
-`gwbench providers smart fast cheap` compares time to first token and total time per route on real providers. It needs API keys and **has not been run for this README**, so there are no provider comparisons here.
+`gwbench providers ROUTE...` streams the same prompt through each route and records time to first token and total time.
+
+- **No cloud providers here.** No API keys were available, so it ran against three local models served by [Ollama](https://ollama.com) on an Apple M1, with [`bench/local.yaml`](bench/local.yaml). It compares the gateway's code paths on real models, not cloud providers.
+- **Both adapters, one model.** Ollama speaks both the OpenAI and the Anthropic API, so the same model, `qwen3:4b-instruct`, was reached through the gateway's OpenAI-format adapter and through its Anthropic adapter, which is the official Go SDK pointed at Ollama.
+- **The command:** `gwbench -n 15 -concurrency 1 providers ...`. One request at a time, because Ollama serves one generation at a time on this machine. Full output: [`bench/results/providers.md`](bench/results/providers.md).
+
+| Route | OK | First token p50 | First token p95 | Total p50 | Total p95 |
+|---|---|---|---|---|---|
+| qwen3-4b via the OpenAI adapter | 15/15 | 132 ms | 356 ms | 11.17 s | 16.61 s |
+| qwen3-4b via the Anthropic SDK adapter | 15/15 | 130 ms | 156 ms | 11.52 s | 14.82 s |
+| llama3.2-3b | 15/15 | 98 ms | 7.19 s | 10.53 s | 17.56 s |
+| gemma3-1b | 15/15 | 104 ms | 2.93 s | 4.46 s | 6.28 s |
+| fallback: dead provider, then qwen3-4b | 15/15 | 128 ms | 8.44 s | 12.52 s | 17.77 s |
+
+What the run shows:
+
+- **Both adapters stream correctly from a real model,** with first tokens around 130 ms. The difference between them is within run-to-run noise.
+- **The large p95 first-token times are model loading, not the gateway.** Each route's first request had to load its model after the previous route had used another: 7.2 s for llama3.2-3b, 2.9 s for gemma3-1b, and 8.4 s to reload qwen3-4b on the fallback route. `gwbench` doesn't warm up, and with 15 requests the p95 is the slowest one. Leaving out each route's first request, every first token arrived in under 170 ms.
+- **Fallback and the circuit breaker, on a live model.** The fallback route's primary points at a port with nothing listening.
+  - All 15 requests were served by the local model and logged as fallbacks.
+  - The first 5 tried the dead provider and got "connection refused". Then the circuit opened, and later requests skipped the dead provider.
+  - Once every 30 seconds, the half-open circuit let one probe through: requests 8, 11 and 14. Each probe failed and reopened it.
+  - The request log records every attempt, so this sequence comes straight from the database.
 
 ## How failures are handled
 
@@ -221,6 +243,7 @@ Environment variables are listed in [`.env.example`](.env.example). Docker Compo
 
 ## Lessons learned
 
+- **A benchmark without warm-up measures loading.** On the local-model run, the p95 first-token times of three routes were 3-8 seconds, while every other first token on those routes took under 170 ms. All of the gap was the first request loading a model. Percentiles from 15 requests are only as good as the first one, so either warm up or report the first request separately.
 - **Test the case where everything is down.** The first router, when every circuit was open, still sent the request to the first target "just in case". So a single-target route kept calling a dead provider on every request, which defeats the breaker. It now answers 503 `circuit_open` straight away: 5 ms at p50 in the outage benchmark, with 0 of 600 calls reaching the dead provider.
 - **Define "fallback" from the client's side.** At first a request counted as a fallback only if an earlier attempt had failed. Requests that skipped an open circuit and went straight to the secondary weren't counted, so the dashboard understated an outage exactly while one was happening. Comparing the target that served the request with the route's first target fixed it.
 - **Retries belong in one layer.** The SDK's default retries, with backoff, under the gateway's own fallback would make a client wait seconds on a dead provider before moving to the next one. With SDK retries off, the gateway is the only place that decides to retry, and where.
