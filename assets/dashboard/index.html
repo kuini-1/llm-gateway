@@ -1,1 +1,84 @@
-<!doctype html><title>Gateway</title>
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LLM Gateway</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="top">
+    <div class="brand"><span class="mark">◇</span> LLM Gateway</div>
+    <div class="controls">
+      <div class="seg" role="tablist" aria-label="Time window">
+        <button data-w="1h" class="on">1 hour</button>
+        <button data-w="24h">24 hours</button>
+        <button data-w="7d">7 days</button>
+      </div>
+      <span id="updated" class="muted small"></span>
+      <button id="signout" class="ghost small">Sign out</button>
+    </div>
+  </header>
+
+  <main>
+    <p id="error" class="banner" hidden></p>
+
+    <section class="kpis" id="kpis"></section>
+
+    <section class="grid2">
+      <div class="card">
+        <h2>Requests</h2>
+        <p class="muted small">Successful and failed requests per <span class="bucket">minute</span></p>
+        <div id="reqChart" class="chart"></div>
+      </div>
+      <div class="card">
+        <h2>Median latency</h2>
+        <p class="muted small">Gateway response time per <span class="bucket">minute</span>, all endpoints</p>
+        <div id="latChart" class="chart"></div>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Providers</h2>
+      <p class="muted small">Every target that served or failed a request in the window, with its circuit breaker.</p>
+      <div class="table-wrap"><table id="targets"></table></div>
+    </section>
+
+    <section class="grid2">
+      <div class="card">
+        <h2>Spend this month</h2>
+        <p class="muted small">Per project, against its monthly cap.</p>
+        <div id="projects"></div>
+      </div>
+      <div class="card">
+        <h2>Routes</h2>
+        <p class="muted small">What clients put in <code>model</code>, and the targets tried in order.</p>
+        <div id="routes"></div>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="row-between">
+        <h2>Request log</h2>
+        <div class="seg small" id="logFilter">
+          <button data-f="error" class="on">Errors</button>
+          <button data-f="fallback">Fallbacks</button>
+          <button data-f="all">All</button>
+        </div>
+      </div>
+      <div class="table-wrap"><table id="log"></table></div>
+    </section>
+  </main>
+
+  <dialog id="login">
+    <form method="dialog" id="loginForm">
+      <h2>Admin token</h2>
+      <p class="muted small">The value of <code>GATEWAY_ADMIN_TOKEN</code>. It is kept in this tab only.</p>
+      <input id="tokenInput" type="password" autocomplete="off" required>
+      <button class="primary" type="submit">Open dashboard</button>
+    </form>
+  </dialog>
+
+  <script src="app.js"></script>
+</body>
+</html>

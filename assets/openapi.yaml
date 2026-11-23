@@ -1,1 +1,463 @@
 openapi: 3.1.0
+info:
+  title: LLM Gateway
+  version: 0.1.0
+  description: |
+    One OpenAI-compatible API in front of Anthropic, OpenAI, DeepSeek and
+    self-hosted models, with fallback between providers, an embedding cache,
+    monthly spend caps per project and per key, and a request log.
+
+    Client endpoints take a gateway API key (`Authorization: Bearer gw_...`).
+    Admin endpoints take the admin token (`admin_token` in the config).
+
+servers:
+  - url: http://localhost:8080
+
+tags:
+  - name: client
+  - name: admin
+  - name: ops
+
+paths:
+  /v1/chat/completions:
+    post:
+      tags: [client]
+      summary: Chat completion, routed with fallback
+      description: |
+        `model` is a route name from the gateway config (for example `smart`) or
+        `provider/model` to address one upstream directly, without fallback.
+        Text content only; `tools`, `functions`, `response_format` and `n` > 1
+        are rejected with 400 rather than silently ignored.
+
+        With `stream: true` the response is a server-sent event stream of
+        `chat.completion.chunk` objects ending with a usage chunk (which carries
+        `x_gateway`) and `data: [DONE]`. A failure before the first token is a
+        normal JSON error; a failure after it is sent as a final
+        `{"error": ...}` event.
+      security: [{clientKey: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ChatRequest'}
+            example:
+              model: smart
+              max_tokens: 300
+              messages:
+                - {role: system, content: 'Answer in one sentence.'}
+                - {role: user, content: 'What does a circuit breaker do?'}
+      responses:
+        '200':
+          description: Completion (JSON) or event stream when `stream` is true.
+          headers:
+            X-Request-ID: {schema: {type: string}}
+            X-Gateway-Provider: {description: Provider and model that answered, schema: {type: string}, example: anthropic/claude-opus-5-5}
+            X-Gateway-Cost-USD: {schema: {type: string}, example: '0.00184000'}
+            X-Gateway-Fallback-From: {description: Set when the route's first target did not answer, schema: {type: string}}
+            X-Gateway-Warning: {description: Parameters the provider ignored, schema: {type: string}}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ChatResponse'}
+              example:
+                id: req_9f2c1a7b3d4e5f60
+                object: chat.completion
+                created: 1795400000
+                model: smart
+                choices:
+                  - index: 0
+                    finish_reason: stop
+                    message: {role: assistant, content: 'It stops sending traffic to a failing dependency until it recovers.'}
+                usage: {prompt_tokens: 31, completion_tokens: 15, total_tokens: 46, prompt_tokens_details: {cached_tokens: 0}}
+                x_gateway:
+                  request_id: req_9f2c1a7b3d4e5f60
+                  route: smart
+                  provider: openai
+                  model: gpt-5-mini
+                  cost_usd: 0.0000376
+                  latency_ms: 812
+                  fallback_from: anthropic/claude-opus-5-5
+                  attempts:
+                    - {provider: anthropic, model: claude-opus-5-5, latency_ms: 402, error: 'anthropic: HTTP 529 (unavailable): overloaded', kind: unavailable}
+                    - {provider: openai, model: gpt-5-mini, latency_ms: 410}
+                  warnings: []
+            text/event-stream:
+              schema: {type: string}
+        '400': {$ref: '#/components/responses/Error'}
+        '401': {$ref: '#/components/responses/Error'}
+        '402':
+          description: The project's or key's monthly cap can't cover this request's worst-case cost. Not retryable until the cap is raised or the month ends.
+          content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}
+        '404': {$ref: '#/components/responses/Error'}
+        '422': {description: Every target declined the request (refusal)., content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+        '429':
+          description: Rate limit for this key.
+          headers: {Retry-After: {schema: {type: integer}}}
+          content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}
+        '502': {description: Every target failed., content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+        '503': {description: Every target's circuit breaker is open (`circuit_open`) or a dependency is down., content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+        '504': {description: Every target timed out., content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+
+  /v1/embeddings:
+    post:
+      tags: [client]
+      summary: Embeddings, served from cache where possible
+      description: |
+        Each input is looked up in the cache by model and exact text; only
+        misses are sent upstream, in one batch. `usage.prompt_tokens` counts
+        billed (uncached) tokens only.
+      security: [{clientKey: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [model, input]
+              properties:
+                model: {type: string, example: embed}
+                input:
+                  oneOf:
+                    - {type: string}
+                    - {type: array, items: {type: string}, minItems: 1, maxItems: 2048}
+      responses:
+        '200':
+          description: Vectors in input order.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/EmbeddingResponse'}
+        '400': {$ref: '#/components/responses/Error'}
+        '401': {$ref: '#/components/responses/Error'}
+        '402': {$ref: '#/components/responses/Error'}
+        '429': {$ref: '#/components/responses/Error'}
+        '502': {$ref: '#/components/responses/Error'}
+
+  /v1/models:
+    get:
+      tags: [client]
+      summary: Routes clients can use
+      security: [{clientKey: []}]
+      responses:
+        '200':
+          description: Route names, their kind and their targets in fallback order.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  object: {const: list}
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: {type: string}
+                        object: {const: model}
+                        kind: {enum: [chat, embedding]}
+                        targets: {type: array, items: {type: string}}
+
+  /admin/api/overview:
+    get:
+      tags: [admin]
+      summary: Dashboard data for a time window
+      security: [{adminToken: []}]
+      parameters:
+        - {name: window, in: query, schema: {enum: [1h, 24h, 7d], default: 1h}}
+      responses:
+        '200':
+          description: Totals, per-target stats, a time series, project spend, breaker states and routes.
+          content: {application/json: {schema: {type: object}}}
+        '401': {$ref: '#/components/responses/Error'}
+
+  /admin/api/requests:
+    get:
+      tags: [admin]
+      summary: Recent request log rows
+      security: [{adminToken: []}]
+      parameters:
+        - {name: filter, in: query, schema: {enum: [error, fallback]}, description: Omit for all requests.}
+        - {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 500, default: 100}}
+      responses:
+        '200':
+          description: Newest first.
+          content: {application/json: {schema: {type: array, items: {$ref: '#/components/schemas/RequestLog'}}}}
+
+  /admin/api/projects:
+    get:
+      tags: [admin]
+      summary: Projects with this month's spend
+      security: [{adminToken: []}]
+      responses:
+        '200': {description: Projects., content: {application/json: {schema: {type: array, items: {$ref: '#/components/schemas/Project'}}}}}
+    post:
+      tags: [admin]
+      summary: Create a project
+      security: [{adminToken: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: {type: string}
+                monthly_budget_usd: {type: number, minimum: 0, description: 0 means no cap}
+      responses:
+        '201': {description: Created., content: {application/json: {schema: {$ref: '#/components/schemas/Project'}}}}
+        '409': {$ref: '#/components/responses/Error'}
+
+  /admin/api/projects/{id}:
+    patch:
+      tags: [admin]
+      summary: Change a project's monthly cap
+      security: [{adminToken: []}]
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {type: object, required: [monthly_budget_usd], properties: {monthly_budget_usd: {type: number, minimum: 0}}}
+      responses:
+        '204': {description: Updated.}
+        '404': {$ref: '#/components/responses/Error'}
+
+  /admin/api/keys:
+    get:
+      tags: [admin]
+      summary: API keys (secrets are never returned)
+      security: [{adminToken: []}]
+      responses:
+        '200': {description: Keys., content: {application/json: {schema: {type: array, items: {$ref: '#/components/schemas/Key'}}}}}
+    post:
+      tags: [admin]
+      summary: Create an API key
+      description: The secret is in this response only; the gateway stores a SHA-256 hash.
+      security: [{adminToken: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [project_id, name]
+              properties:
+                project_id: {type: string}
+                name: {type: string, description: Who the key is for}
+                monthly_budget_usd: {type: number, minimum: 0}
+                rpm: {type: integer, minimum: 0, description: 0 means the gateway default}
+      responses:
+        '201':
+          description: Created.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  key: {$ref: '#/components/schemas/Key'}
+                  secret: {type: string, example: gw_mfzwizltoq2gk4tfmvzhe2lomfxgc3dvnv2g}
+                  note: {type: string}
+        '404': {$ref: '#/components/responses/Error'}
+
+  /admin/api/keys/{id}:
+    delete:
+      tags: [admin]
+      summary: Revoke a key
+      description: Takes effect within 30 seconds on other gateway instances (key cache TTL), immediately on this one.
+      security: [{adminToken: []}]
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses:
+        '204': {description: Revoked.}
+        '404': {$ref: '#/components/responses/Error'}
+
+  /healthz:
+    get:
+      tags: [ops]
+      summary: Liveness
+      responses: {'200': {description: The process is up.}}
+  /readyz:
+    get:
+      tags: [ops]
+      summary: Readiness (Postgres and Redis reachable)
+      responses:
+        '200': {description: Ready.}
+        '503': {$ref: '#/components/responses/Error'}
+  /openapi.yaml:
+    get:
+      tags: [ops]
+      summary: This document
+      responses: {'200': {description: OpenAPI 3.1 YAML.}}
+
+components:
+  securitySchemes:
+    clientKey: {type: http, scheme: bearer, description: 'A gateway key: gw_...'}
+    adminToken: {type: http, scheme: bearer, description: The admin token from the config}
+
+  responses:
+    Error:
+      description: Error in the OpenAI shape.
+      content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}
+
+  schemas:
+    Error:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            message: {type: string}
+            type: {type: string}
+            code:
+              type: string
+              enum: [invalid_api_key, invalid_json, invalid_request, unsupported, model_not_found, model_not_priced,
+                     budget_exceeded, rate_limited, refused, upstream_unavailable, upstream_timeout, circuit_open,
+                     client_closed, unauthorized, not_found, exists, not_ready]
+
+    ChatRequest:
+      type: object
+      required: [model, messages]
+      properties:
+        model: {type: string}
+        messages:
+          type: array
+          minItems: 1
+          items:
+            type: object
+            required: [role, content]
+            properties:
+              role: {enum: [system, developer, user, assistant]}
+              content:
+                oneOf:
+                  - {type: string}
+                  - type: array
+                    items: {type: object, properties: {type: {const: text}, text: {type: string}}}
+        max_tokens: {type: integer, description: Defaults to defaults.max_tokens in the config. Also sizes the spend reservation.}
+        max_completion_tokens: {type: integer, description: Takes precedence over max_tokens.}
+        temperature: {type: number, description: Ignored for Claude models (with an X-Gateway-Warning).}
+        reasoning_effort: {enum: [low, medium, high, xhigh, max]}
+        stream: {type: boolean, default: false}
+        user: {type: string}
+
+    ChatResponse:
+      type: object
+      properties:
+        id: {type: string}
+        object: {const: chat.completion}
+        created: {type: integer}
+        model: {type: string, description: The route the client asked for}
+        choices:
+          type: array
+          items:
+            type: object
+            properties:
+              index: {type: integer}
+              finish_reason: {enum: [stop, length, tool_calls, content_filter]}
+              message: {type: object, properties: {role: {const: assistant}, content: {type: string}}}
+        usage:
+          type: object
+          properties:
+            prompt_tokens: {type: integer}
+            completion_tokens: {type: integer}
+            total_tokens: {type: integer}
+            prompt_tokens_details: {type: object, properties: {cached_tokens: {type: integer}}}
+        x_gateway: {$ref: '#/components/schemas/GatewayMeta'}
+
+    GatewayMeta:
+      type: object
+      properties:
+        request_id: {type: string}
+        route: {type: string}
+        provider: {type: string}
+        model: {type: string}
+        cost_usd: {type: number}
+        latency_ms: {type: integer}
+        fallback_from: {type: string}
+        attempts:
+          type: array
+          items:
+            type: object
+            properties:
+              provider: {type: string}
+              model: {type: string}
+              latency_ms: {type: integer}
+              error: {type: string}
+              kind: {enum: [unavailable, rate_limited, timeout, auth, refused, invalid_request]}
+              skipped: {type: boolean, description: The target's circuit was open}
+        warnings: {type: array, items: {type: string}}
+
+    EmbeddingResponse:
+      type: object
+      properties:
+        object: {const: list}
+        model: {type: string}
+        data:
+          type: array
+          items:
+            type: object
+            properties:
+              object: {const: embedding}
+              index: {type: integer}
+              embedding: {type: array, items: {type: number}}
+        usage: {type: object, properties: {prompt_tokens: {type: integer}, total_tokens: {type: integer}}}
+        x_gateway:
+          type: object
+          properties:
+            request_id: {type: string}
+            provider: {type: string, description: '"cache" when every input was a hit'}
+            model: {type: string}
+            cache_hits: {type: integer}
+            cache_misses: {type: integer}
+            cost_usd: {type: number}
+            saved_usd: {type: number, description: What the hits would have cost}
+
+    Project:
+      type: object
+      properties:
+        id: {type: string}
+        name: {type: string}
+        monthly_budget_usd: {type: number}
+        spent_this_month_usd: {type: number}
+        requests_this_month: {type: integer}
+        active_keys: {type: integer}
+        created_at: {type: string, format: date-time}
+
+    Key:
+      type: object
+      properties:
+        id: {type: string}
+        project_id: {type: string}
+        project_name: {type: string}
+        name: {type: string}
+        prefix: {type: string, description: First characters of the secret}
+        monthly_budget_usd: {type: number}
+        rpm: {type: integer}
+        created_at: {type: string, format: date-time}
+        revoked_at: {type: [string, 'null'], format: date-time}
+
+    RequestLog:
+      type: object
+      properties:
+        id: {type: string}
+        ts: {type: string, format: date-time}
+        project_id: {type: string}
+        key_id: {type: string}
+        endpoint: {enum: [chat, embeddings]}
+        route: {type: string}
+        provider: {type: string}
+        model: {type: string}
+        stream: {type: boolean}
+        status: {enum: [ok, error]}
+        http_status: {type: integer}
+        error_kind: {type: string}
+        error: {type: string}
+        latency_ms: {type: integer}
+        ttfb_ms: {type: [integer, 'null']}
+        input_tokens: {type: integer}
+        output_tokens: {type: integer}
+        cache_read_tokens: {type: integer}
+        cache_write_tokens: {type: integer}
+        cost_usd: {type: number}
+        emb_inputs: {type: integer}
+        emb_cache_hits: {type: integer}
+        saved_usd: {type: number}
+        fallback_from: {type: string}
+        attempts: {type: array, items: {type: object}}
