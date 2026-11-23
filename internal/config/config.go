@@ -139,6 +139,15 @@ func (c *Config) Validate() error {
 		if len(r.Targets) == 0 {
 			errs = append(errs, fmt.Errorf("route %q has no targets", name))
 		}
+		// Vectors from different embedding models live in different spaces:
+		// falling back to another model would silently corrupt a vector index.
+		if r.Kind == "embedding" {
+			for _, t := range r.Targets {
+				if t.Model != r.Targets[0].Model {
+					errs = append(errs, fmt.Errorf("route %q: embedding fallbacks must serve the same model (%q vs %q)", name, r.Targets[0].Model, t.Model))
+				}
+			}
+		}
 		for _, t := range r.Targets {
 			p, ok := c.Providers[t.Provider]
 			if !ok {
