@@ -1,0 +1,5 @@
+/bin/
+.env
+gateway.yaml
+*.test
+.DS_Store
