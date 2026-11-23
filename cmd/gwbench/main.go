@@ -32,6 +32,8 @@ var (
 	mockA      = flag.String("mock-primary", "http://127.0.0.1:9001", "primary mock (Anthropic API)")
 	mockB      = flag.String("mock-secondary", "http://127.0.0.1:9002", "secondary mock (OpenAI API)")
 	out        = flag.String("out", "bench/results", "output folder")
+	provN      = flag.Int("n", 30, "providers: requests per route")
+	provConc   = flag.Int("concurrency", 3, "providers: requests in flight per route (use 1 for a local model that serves one request at a time)")
 	client     = &http.Client{Timeout: 2 * time.Minute, Transport: &http.Transport{MaxIdleConnsPerHost: 256}}
 )
 
@@ -516,7 +518,7 @@ func providers(ctx context.Context, key string, routes []string) (string, error)
 	if len(routes) == 0 {
 		return "", errors.New("name the routes to compare, e.g. gwbench providers claude gpt deepseek")
 	}
-	const n, conc = 30, 3
+	n, conc := *provN, *provConc
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "## Provider latency\n\n%d streaming requests per route, %d concurrent, same prompt, max_tokens 200.\n\n", n, conc)
 	sb.WriteString("| Route | OK | First token p50 | First token p95 | Total p50 | Total p95 |\n|---|---|---|---|---|---|\n")
